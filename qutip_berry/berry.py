@@ -22,8 +22,14 @@ J. Phys. Soc. Jpn. 74, 1674 (2005).
 """
 
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 
-__all__ = ["berry_phase", "berry_curvature", "chern_number"]
+__all__ = [
+    "berry_phase", "berry_curvature", "chern_number",
+    "berry_phase_from_hamiltonian",
+    "berry_curvature_from_hamiltonian",
+    "chern_number_from_hamiltonian",
+]
 
 
 def _to_grid(eigfs):
@@ -201,3 +207,199 @@ def berry_phase(eigfs):
         s = np.einsum("kh,lh->kl", grid[i].conj(), grid[(i + 1) % n])
         w = w @ s
     return np.angle(np.linalg.det(w))
+
+
+# ---------------------------------------------------------------------------
+# High-level interfaces: compute directly from a parameterized Hamiltonian
+# ---------------------------------------------------------------------------
+
+def _solve_eigenstates(H, args):
+    """Solve ``H(*args)`` and return ``(eigenvalues, eigenvectors)``.
+
+    Eigenvectors are returned as an array of shape ``(n_bands, hilbert_dim)``
+    and sorted by ascending eigenvalue.
+    """
+    Hmat = H(*args)
+    if hasattr(Hmat, "eigenstates"):
+        evals, evecs = Hmat.eigenstates()
+        evecs_arr = np.array([e.full().reshape(-1) for e in evecs])
+        return np.asarray(evals, dtype=float), evecs_arr
+    H_np = np.asarray(Hmat, dtype=complex)
+    evals, evecs = np.linalg.eigh(H_np)
+    return evals, evecs.T  # evecs.T[i] is the i-th eigenstate
+
+
+def _adiabatic_sort(evecs_new, evecs_ref):
+    """Reorder ``evecs_new`` so it is adiabatically continuous with ``evecs_ref``.
+
+    Uses maximum-overlap matching solved by the Hungarian algorithm
+    (``scipy.optimize.linear_sum_assignment``) on the matrix of
+    ``|<ref_i | new_j>|``.
+
+    Both inputs have shape ``(n_bands, hilbert_dim)``.
+    """
+    S = np.abs(np.einsum("ih,jh->ij", evecs_ref.conj(), evecs_new))
+    _, col_ind = linear_sum_assignment(-S)
+    return evecs_new[col_ind]
+
+
+def _eigfs_from_hamiltonian_2d(H, params0, params1, bands):
+    """Sweep a 2D parameter grid and return eigenstates with adiabatic tracking.
+
+    Returns an array of shape ``(n0, n1, n_bands, hilbert_dim)``.
+    """
+    params0 = np.asarray(params0, dtype=float)
+    params1 = np.asarray(params1, dtype=float)
+    n0, n1 = len(params0), len(params1)
+
+    if isinstance(bands, (int, np.integer)):
+        bands = [int(bands)]
+    bands = list(bands)
+    n_bands = len(bands)
+
+    eigfs = None
+    for i in range(n0):
+        for j in range(n1):
+            evals, evecs = _solve_eigenstates(H, (params0[i], params1[j]))
+
+            if eigfs is None:
+                hilbert_dim = evecs.shape[1]
+                eigfs = np.zeros((n0, n1, n_bands, hilbert_dim), dtype=complex)
+                eigfs[i, j] = evecs[bands]  # first point: energy order
+            else:
+                # Adiabatic reference: left neighbor if available, else top
+                if j > 0:
+                    ref = eigfs[i, j - 1]
+                else:
+                    ref = eigfs[i - 1, j]
+                evecs_sorted = _adiabatic_sort(evecs, ref)
+                eigfs[i, j] = evecs_sorted  # already n_bands matched
+
+    return eigfs
+
+
+def _eigfs_from_hamiltonian_1d(H, params, bands):
+    """Sweep a 1D closed parameter path and return eigenstates with tracking.
+
+    Returns an array of shape ``(n, n_bands, hilbert_dim)``.
+    """
+    params = np.asarray(params, dtype=float)
+    n = len(params)
+
+    if isinstance(bands, (int, np.integer)):
+        bands = [int(bands)]
+    bands = list(bands)
+    n_bands = len(bands)
+
+    eigfs = None
+    for i in range(n):
+        evals, evecs = _solve_eigenstates(H, (params[i],))
+
+        if eigfs is None:
+            hilbert_dim = evecs.shape[1]
+            eigfs = np.zeros((n, n_bands, hilbert_dim), dtype=complex)
+            eigfs[i] = evecs[bands]
+        else:
+            evecs_sorted = _adiabatic_sort(evecs, eigfs[i - 1])
+            eigfs[i] = evecs_sorted  # already n_bands matched
+
+    return eigfs
+
+
+def berry_curvature_from_hamiltonian(H, params, bands=0, periodic=(False, False)):
+    """Compute the discretized Berry curvature directly from a parameterized
+    Hamiltonian.
+
+    This is a high-level convenience wrapper: it sweeps the parameter space,
+    solves for eigenstates at every grid point (with adiabatic tracking to
+    keep bands continuous across avoided crossings), and then delegates to
+    :func:`berry_curvature`.
+
+    Parameters
+    ----------
+    H : callable
+        Hamiltonian function ``H(theta0, theta1)`` returning a QuTiP
+        ``Qobj`` (or any object with an ``eigenstates()`` method, or a
+        Hermitian NumPy array).
+    params : tuple of array_like
+        ``(params0, params1)`` — two 1D arrays defining the parameter grid.
+    bands : int or list of int, default 0
+        Band index (or list of band indices) to include, with ``0`` the
+        ground state. A single band uses the FHS formulation (exact integer
+        Chern number); multiple bands use the Wilson-loop determinant.
+    periodic : tuple of bool, default (False, False)
+        Whether each parameter dimension is periodic (closed grid).
+
+    Returns
+    -------
+    b_curv : ndarray
+        Discretized Berry curvature (plaquette flux), shape ``(m0, m1)``
+        where ``m = n`` for a periodic dimension and ``m = n - 1`` otherwise.
+
+    Examples
+    --------
+    >>> from qutip import sigmax, sigmay, sigmaz
+    >>> import numpy as np
+    >>> def H(th, ph):
+    ...     n = [np.sin(th)*np.cos(ph), np.sin(th)*np.sin(ph), np.cos(th)]
+    ...     return n[0]*sigmax() + n[1]*sigmay() + n[2]*sigmaz()
+    >>> thetas = np.linspace(0, np.pi, 20)
+    >>> phis = np.linspace(0, 2*np.pi, 20, endpoint=False)
+    >>> F = berry_curvature_from_hamiltonian(H, (thetas, phis),
+    ...                                        bands=0, periodic=(False, True))
+    """
+    params0, params1 = params
+    eigfs = _eigfs_from_hamiltonian_2d(H, params0, params1, bands)
+    return berry_curvature(eigfs, periodic=periodic)
+
+
+def chern_number_from_hamiltonian(H, params, bands=0, periodic=(False, False)):
+    """Compute the Chern number directly from a parameterized Hamiltonian.
+
+    High-level wrapper around :func:`chern_number`; see
+    :func:`berry_curvature_from_hamiltonian` for the parameter description.
+
+    Returns
+    -------
+    chern : float
+        The summed Berry curvature divided by ``2*pi``. With a single band
+        (FHS) this is exactly integral up to floating-point roundoff.
+    """
+    params0, params1 = params
+    eigfs = _eigfs_from_hamiltonian_2d(H, params0, params1, bands)
+    return chern_number(eigfs, periodic=periodic)
+
+
+def berry_phase_from_hamiltonian(H, params, bands=0):
+    """Compute the Berry (Zak) phase directly from a parameterized Hamiltonian.
+
+    High-level wrapper that sweeps a 1D closed parameter path, solves for
+    eigenstates with adiabatic tracking, and calls :func:`berry_phase`.
+
+    Parameters
+    ----------
+    H : callable
+        Hamiltonian function ``H(theta)`` returning a Qobj or Hermitian
+        NumPy array.
+    params : array_like
+        1D array of parameter values along the closed path. The path is
+        closed: the last point connects back to the first.
+    bands : int or list of int, default 0
+        Band index (or list of band indices).
+
+    Returns
+    -------
+    phase : float
+        The gauge-invariant Berry phase in ``(-pi, pi]``.
+
+    Examples
+    --------
+    >>> from qutip import sigmax, sigmay
+    >>> import numpy as np
+    >>> def H(k):
+    ...     return (1 + 2*np.cos(k))*sigmax() + 2*np.sin(k)*sigmay()
+    >>> ks = np.linspace(0, 2*np.pi, 50, endpoint=False)
+    >>> zak = berry_phase_from_hamiltonian(H, ks, bands=0)
+    """
+    eigfs = _eigfs_from_hamiltonian_1d(H, params, bands)
+    return berry_phase(eigfs)

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qutip-berry"
-version = "0.1.0"
+version = "0.2.0"
 description = "Geometric phases and topological invariants (Berry curvature, Chern number, Zak phase) for QuTiP"
 readme = "README.md"
 license = {text = "BSD-3-Clause"}
