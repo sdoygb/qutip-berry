@@ -1,0 +1,8 @@
+qutip>=5.0
+numpy
+scipy
+
+[dev]
+pytest
+matplotlib
+jupyter

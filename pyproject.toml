@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qutip-berry"
+version = "0.1.0"
+description = "Geometric phases and topological invariants (Berry curvature, Chern number, Zak phase) for QuTiP"
+readme = "README.md"
+license = {text = "BSD-3-Clause"}
+requires-python = ">=3.9"
+authors = [
+    {name = "sdoygb"},
+]
+keywords = ["qutip", "quantum", "berry", "chern", "topology", "geometric phase", "zak phase"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: BSD License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+    "qutip>=5.0",
+    "numpy",
+    "scipy",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "matplotlib", "jupyter"]
+
+[tool.setuptools.packages.find]
+include = ["qutip_berry*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
